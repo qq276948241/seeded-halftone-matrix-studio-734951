@@ -1,7 +1,7 @@
 package dither
 
 import (
-	"math/rand"
+	"math"
 )
 
 // PixelMapper is a function that takes the coordinate and color of a pixel,
@@ -17,18 +17,51 @@ import (
 // anyway, so this is done as a convenience. The RGB values are in the range
 // [0, 65535], and must be returned in the same range.
 //
+// The coordinates are the absolute coordinates of the pixel in the image,
+// which may be non-zero if the image's bounds don't start at the origin.
+//
 // It must be thread-safe, as it will be called concurrently.
 type PixelMapper func(x, y int, r, g, b uint16) (uint16, uint16, uint16)
+
+// hashNoise returns a deterministic pseudo-random value in the range [0, 1),
+// derived only from the seed and the pixel coordinates. Because it doesn't
+// use any shared or mutable state, it is safe for concurrent use, and the
+// output is identical no matter how many goroutines are dithering or in what
+// order pixels are processed.
+func hashNoise(seed int64, x, y, channel int) float32 {
+	// splitmix64-style finalizer applied to a mix of the inputs
+	h := uint64(seed) + 0x9E3779B97F4A7C15
+	h ^= uint64(int64(x)) * 0xBF58476D1CE4E5B9
+	h = (h ^ (h >> 30)) * 0xBF58476D1CE4E5B9
+	h ^= uint64(int64(y)) * 0x94D049BB133111EB
+	h = (h ^ (h >> 27)) * 0x94D049BB133111EB
+	h ^= uint64(int64(channel)) * 0x2545F4914F6CDD1D
+	h ^= h >> 31
+	// Use the top 24 bits to build a float32 in [0, 1)
+	return float32(h>>40) * (1.0 / 16777216.0)
+}
+
+// checkNoiseRange panics if a random noise range is invalid.
+func checkNoiseRange(min, max float32) {
+	if math.IsNaN(float64(min)) || math.IsNaN(float64(max)) ||
+		math.IsInf(float64(min), 0) || math.IsInf(float64(max), 0) {
+		panic("dither: random noise range values must be finite numbers")
+	}
+	if min >= max {
+		panic("dither: random noise min must be less than max")
+	}
+}
 
 // RandomNoiseGrayscale returns a PixelMapper that adds random noise to the
 // color before returning. This is the simplest form of dithering.
 //
 // Non-grayscale colors will be converted to grayscale before the noise is added.
 //
-// You must call rand.Seed before calling using the PixelMapper, otherwise the
-// output will be the same each time. A simple way to initialize rand.Seed is:
-//
-//     rand.Seed(time.Now().UnixNano())
+// The noise is deterministic: it is derived from the provided seed and the
+// pixel coordinates only, without any global or shared random state. This
+// means the same seed, image, and settings always produce the exact same
+// output, no matter how many times or how concurrently the mapper is used.
+// Different seeds produce different, uncorrelated output.
 //
 // The noise added to each channel will be randomly chosen from within the range
 // of min (inclusive) and max (exclusive). To simplify things, you can consider
@@ -49,7 +82,10 @@ type PixelMapper func(x, y int, r, g, b uint16) (uint16, uint16, uint16)
 // If the noise puts the channel value too high or too low it will be clamped,
 // not wrapped. Basically, don't worry about the values of your min and max
 // distorting the image in an unexpected way.
-func RandomNoiseGrayscale(min, max float32) PixelMapper {
+//
+// The function panics if min >= max, or if either is not a finite number.
+func RandomNoiseGrayscale(seed int64, min, max float32) PixelMapper {
+	checkNoiseRange(min, max)
 	return PixelMapper(func(x, y int, r, g, b uint16) (uint16, uint16, uint16) {
 		// These values were taken from Wikipedia:
 		// https://en.wikipedia.org/wiki/Grayscale#Colorimetric_(perceptual_luminance-preserving)_conversion_to_grayscale
@@ -60,7 +96,7 @@ func RandomNoiseGrayscale(min, max float32) PixelMapper {
 		// Basically, this takes linear RGB and gives a linear gray.
 		gray := (13933*uint32(r) + 46871*uint32(g) + 4732*uint32(b) + 1<<15) >> 16
 
-		new := RoundClamp(float32(gray) + 65535.0*(rand.Float32()*(max-min)+min))
+		new := RoundClamp(float32(gray) + 65535.0*(hashNoise(seed, x, y, 0)*(max-min)+min))
 		return new, new, new
 	})
 }
@@ -73,12 +109,17 @@ func RandomNoiseGrayscale(min, max float32) PixelMapper {
 // to be the same.
 //
 // See RandomNoiseGrayscale for more details about values and how this function
-// works.
-func RandomNoiseRGB(minR, maxR, minG, maxG, minB, maxB float32) PixelMapper {
+// works, including how the seed makes the output deterministic.
+//
+// The function panics if any min >= max, or if any value is not finite.
+func RandomNoiseRGB(seed int64, minR, maxR, minG, maxG, minB, maxB float32) PixelMapper {
+	checkNoiseRange(minR, maxR)
+	checkNoiseRange(minG, maxG)
+	checkNoiseRange(minB, maxB)
 	return PixelMapper(func(x, y int, r, g, b uint16) (uint16, uint16, uint16) {
-		return RoundClamp(float32(r) + 65535.0*(rand.Float32()*(maxR-minR)+minR)),
-			RoundClamp(float32(g) + 65535.0*(rand.Float32()*(maxG-minG)+minG)),
-			RoundClamp(float32(b) + 65535.0*(rand.Float32()*(maxB-minB)+minB))
+		return RoundClamp(float32(r) + 65535.0*(hashNoise(seed, x, y, 0)*(maxR-minR)+minR)),
+			RoundClamp(float32(g) + 65535.0*(hashNoise(seed, x, y, 1)*(maxG-minG)+minG)),
+			RoundClamp(float32(b) + 65535.0*(hashNoise(seed, x, y, 2)*(maxB-minB)+minB))
 	})
 }
 
@@ -198,7 +239,8 @@ func convThresholdToAddition(scale float32, value uint, max uint) float32 {
 //     https://bisqwit.iki.fi/story/howto/dither/jy/#Appendix%202ThresholdMatrix
 //
 // strength should be in the range [-1, 1]. It is multiplied with 65535
-// (the max color value), which is then multiplied with the matrix.
+// (the max color value), which is then multiplied with the matrix. It must be
+// a finite number, otherwise the function panics.
 //
 // You can use this to change the amount the matrix is applied to the image, the
 // "strength" of the dithering matrix. Usually just keeping it at 1.0 is fine.
@@ -260,6 +302,9 @@ func Bayer(x, y uint, strength float32) PixelMapper {
 	if x == 0 || y == 0 {
 		panic("dither: Bayer: neither x or y can be zero")
 	}
+	if math.IsNaN(float64(strength)) || math.IsInf(float64(strength), 0) {
+		panic("dither: Bayer: strength must be a finite number")
+	}
 	if x == 3 && y == 3 {
 		matrix = [][]uint{
 			{0, 5, 2},
@@ -317,10 +362,34 @@ func Bayer(x, y uint, strength float32) PixelMapper {
 //
 // See Bayer for a detailed explanation of strength. You can use this to change the
 // amount the matrix is applied to the image, and to reduce noise. Usually you'll
-// just want to set it to 1.0.
+// just want to set it to 1.0. It must be a finite number.
+//
+// The function panics if the matrix is empty or not rectangular, if Max is
+// zero, if any matrix value is >= Max, or if strength is not finite.
 func PixelMapperFromMatrix(odm OrderedDitherMatrix, strength float32) PixelMapper {
+	if len(odm.Matrix) == 0 || len(odm.Matrix[0]) == 0 {
+		panic("dither: PixelMapperFromMatrix: matrix is empty")
+	}
+	if math.IsNaN(float64(strength)) || math.IsInf(float64(strength), 0) {
+		panic("dither: PixelMapperFromMatrix: strength must be a finite number")
+	}
+	if odm.Max == 0 {
+		panic("dither: PixelMapperFromMatrix: Max cannot be zero")
+	}
+
 	ydim := len(odm.Matrix)
 	xdim := len(odm.Matrix[0])
+	for i := range odm.Matrix {
+		if len(odm.Matrix[i]) != xdim {
+			panic("dither: PixelMapperFromMatrix: matrix is not rectangular")
+		}
+		for _, v := range odm.Matrix[i] {
+			if v >= odm.Max {
+				panic("dither: PixelMapperFromMatrix: matrix values must be less than Max")
+			}
+		}
+	}
+
 	scale := 65535.0 * strength
 
 	// Create precalculated matrix

@@ -4,6 +4,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+### Added
+- `Ditherer.MaxPixels` pixel budget (default `DefaultMaxPixels`): oversized images are rejected with a panic before the source image is touched
+- Input pre-validation: nil images, and standard image types whose `Pix`/`Stride` are inconsistent with their bounds, panic before any pixel is modified
+- `ErrorDiffusionMatrix` validation: empty, non-rectangular, non-finite, or past-modifying matrices panic before dithering starts
+- `PixelMapperFromMatrix` validates empty/non-rectangular matrices, zero `Max`, values `>= Max`, and non-finite strength
+- `Bayer` and `ErrorDiffusionStrength` validate that strength is finite
+- `RandomNoiseGrayscale` and `RandomNoiseRGB` validate their noise ranges
+- Independent scalar reference implementation in the tests, compared per-channel against the library, plus tests for transparency, palette ties, seeded randomness, validation, immutability, and concurrency
+
+### Changed
+- **Breaking**: `RandomNoiseGrayscale` and `RandomNoiseRGB` now take a seed as their first argument. Noise is derived from the seed and pixel coordinates instead of the global `math/rand` source, so output is deterministic (no `rand.Seed` needed) and identical under concurrent use
+- Fully transparent pixels are now always output as transparent black, and they neither generate nor receive diffused error; their hidden RGB values are never used. This changes output for images with transparency
+- `ErrorDiffusionStrength` always returns a copy, even for strength 1.0, so the shared built-in matrices can't be mutated through it
+- Palettes are compared by RGBA values rather than concrete color types, so a `*image.Paletted` with a semantically equal palette is dithered in place
+- Serpentine direction is determined relative to the image bounds, so shifted images dither identically
+
+### Fixed
+- `Dither` no longer panics on a `*image.Paletted` whose palette matches the Ditherer's
+- Error diffusion dithering now works on images with a non-zero origin (it used to panic or corrupt the output)
+- Empty images are a no-op instead of being processed
+
 ## [2.4.0] - 2023-12-20
 ### Changed
 - Increased error diffusion dithering speed by ~50%

@@ -108,6 +108,38 @@ If you're interested in what specific algorithms look like, you can check out th
 
 Operations that only affect each pixel individually are parallelized, using `runtime.GOMAXPROCS(0)` which defaults to the number of CPUs. This applies to any `PixelMapper` (aka `Ditherer.Mapper`) but not to an `ErrorDiffusionMatrix` (aka `Ditherer.Matrix`), as the latter is inherently sequential.
 
+## Correctness and determinism
+
+All dithering happens in linear RGB space, palette colors are compared with luminance-weighted Euclidean distance (ties are won by the palette color that comes first), and output values are rounded ties-to-even. This is shared by the ordered (`PixelMapper`) and error diffusion (`Matrix`) paths.
+
+The same input and settings always produce pixel-identical output. The random noise mappers are seeded (`RandomNoiseGrayscale(seed, ...)`, `RandomNoiseRGB(seed, ...)`) and derive noise from the seed and pixel coordinates only — no global random state — so they are deterministic and safe for concurrent use.
+
+Transparency follows a fixed policy: fully transparent pixels are output as transparent black, their hidden RGB values are never used, and they neither generate nor receive diffused error. Partially transparent pixels are dithered by their unpremultiplied color and premultiplied again on output, with alpha preserved. Error that error diffusion would push outside the image bounds is discarded.
+
+Input images are validated before any pixel is modified: nil images, images larger than the pixel budget (`Ditherer.MaxPixels`, default `DefaultMaxPixels`), and standard image types whose `Pix`/`Stride` are inconsistent with their bounds all cause a panic *before* the source image is touched. Images with empty bounds are a no-op. Images with a non-zero origin are fully supported.
+
+## Testing
+
+Run the full suite:
+
+```
+go test ./...
+```
+
+Run it with the race detector (recommended, the suite contains concurrency tests):
+
+```
+go test -race ./...
+```
+
+The suite verifies correctness numerically, not visually: an independent scalar reference implementation (`reference_test.go`) is compared per-channel against the library for ordered and error diffusion dithering, and other tests check transparency handling, palette tie-breaking, seeded randomness reproducibility, input validation, source-image immutability, and concurrent use. The golden images under `images/output/` are only used as an extra regression check.
+
+Dependency boundaries: the tests share no mutable state and do not depend on the global `math/rand` source, so the suite can be run with any `-count` and with `-race`. The one exception is golden image regeneration, which writes the files the golden tests read — it must be run on its own, never together with other tests:
+
+```
+DITHER_REGEN_GOLDEN=1 go test -run TestGenerateGoldenImages .
+go test ./...   # confirm the regenerated images match
+```
 
 ## Scaling images
 

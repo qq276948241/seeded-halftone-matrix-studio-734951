@@ -17,8 +17,9 @@ package dither
 //
 // Leaving Max as 0 will cause a panic.
 //
-// Matrix values should almost always range from 0 to Max-1. If the matrix you found
-// ranges from 1 to Max, just subtract 1 from every value when programming it.
+// Matrix values must range from 0 to Max-1, other values cause a panic. If the
+// matrix you found ranges from 1 to Max, just subtract 1 from every value when
+// programming it.
 type OrderedDitherMatrix struct {
 	Matrix [][]uint `json:"matrix"`
 	Max    uint     `json:"max"`

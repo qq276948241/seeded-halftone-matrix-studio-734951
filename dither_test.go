@@ -5,7 +5,6 @@ import (
 	"image/color"
 	_ "image/jpeg"
 	"image/png"
-	"math/rand"
 	"os"
 	"reflect"
 	"testing"
@@ -92,26 +91,63 @@ func createDitheredImage(input, output string, d *Ditherer, t *testing.T) {
 	t.Log("Output: " + output)
 }
 
-func TestRandomNoiseGrayscale(t *testing.T) {
-	rand.Seed(1)
+// TestGenerateGoldenImages regenerates the golden images under images/output
+// that cannot be derived from other tests. It only runs when the environment
+// variable DITHER_REGEN_GOLDEN is set:
+//
+//	DITHER_REGEN_GOLDEN=1 go test -run TestGenerateGoldenImages .
+//
+// It must be run on its own, never together with the rest of the suite,
+// because it writes the same files the golden comparison tests read.
+// Afterwards, run the full suite (go test ./...) to confirm the regenerated
+// images match.
+func TestGenerateGoldenImages(t *testing.T) {
+	if os.Getenv("DITHER_REGEN_GOLDEN") == "" {
+		t.Skip("set DITHER_REGEN_GOLDEN=1 to regenerate golden images")
+	}
+
 	d := NewDitherer(blackWhite)
-	d.Mapper = RandomNoiseGrayscale(-0.5, 0.5)
-	d.SingleThreaded = true
+	d.Mapper = RandomNoiseGrayscale(1, -0.5, 0.5)
+	createDitheredImage(gradient, "random_noise_grayscale.png", d, t)
+
+	noise := RandomNoiseRGB(1, -0.5, 0.5, -0.5, 0.5, -0.5, 0.5)
+	d = NewDitherer(redGreenBlack)
+	d.Mapper = noise
+	createDitheredImage(peppers, "random_noise_rgb_red-green-black.png", d, t)
+	d = NewDitherer(redGreenYellowBlack)
+	d.Mapper = noise
+	createDitheredImage(peppers, "random_noise_rgb_red-green-yellow-black.png", d, t)
+
+	d = NewDitherer([]color.Color{
+		color.Black,
+		color.White,
+		color.RGBA{255, 0, 0, 255},
+		color.RGBA{0, 255, 0, 255},
+		color.RGBA{0, 0, 255, 255},
+	})
+	d.Mapper = Bayer(4, 4, 1)
+	createDitheredImage(dice, "alpha_bayer.png", d, t)
+
+	d.Mapper = nil
+	d.Matrix = FloydSteinberg
+	createDitheredImage(dice, "alpha_floyd-steinberg.png", d, t)
+}
+
+func TestRandomNoiseGrayscale(t *testing.T) {
+	d := NewDitherer(blackWhite)
+	d.Mapper = RandomNoiseGrayscale(1, -0.5, 0.5)
 	ditherAndCompareImage(gradient, "random_noise_grayscale.png", d, t)
 }
 
 func TestRandomNoiseRGB(t *testing.T) {
-	rand.Seed(1)
-	noise := RandomNoiseRGB(-0.5, 0.5, -0.5, 0.5, -0.5, 0.5)
+	noise := RandomNoiseRGB(1, -0.5, 0.5, -0.5, 0.5, -0.5, 0.5)
 
 	d := NewDitherer(redGreenBlack)
 	d.Mapper = noise
-	d.SingleThreaded = true
 	ditherAndCompareImage(peppers, "random_noise_rgb_red-green-black.png", d, t)
 
 	d = NewDitherer(redGreenYellowBlack)
 	d.Mapper = noise
-	d.SingleThreaded = true
 	ditherAndCompareImage(peppers, "random_noise_rgb_red-green-yellow-black.png", d, t)
 }
 

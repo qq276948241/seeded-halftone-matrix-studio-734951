@@ -1,10 +1,22 @@
 package dither
 
+import (
+	"errors"
+	"math"
+	"strconv"
+)
+
 // ErrorDiffusionMatrix holds the matrix for the error-diffusion type of dithering.
 // An example of this would be Floyd-Steinberg or Atkinson.
 //
 // Zero values can be used to represent pixels that have already been processed.
 // The current pixel is assumed to be the right-most zero value in the top row.
+//
+// A valid matrix is rectangular (every row has the same length), contains only
+// finite values, and has only zeros in the top row at and left of the current
+// pixel -- a non-zero value there would modify pixels that were already
+// processed. Invalid matrices cause Dither to panic before the image is
+// touched.
 type ErrorDiffusionMatrix [][]float32
 
 // CurrentPixel returns the index the current pixel.
@@ -34,26 +46,66 @@ func (e ErrorDiffusionMatrix) Offset(x, y, curPx int) (int, int) {
 	return x - curPx, y
 }
 
+// validate returns an error if the matrix cannot be used for error diffusion
+// dithering. See the type docs for what makes a matrix valid.
+func (e ErrorDiffusionMatrix) validate() error {
+	if len(e) == 0 {
+		return errors.New("matrix is empty")
+	}
+	if len(e[0]) == 0 {
+		return errors.New("matrix has an empty first row")
+	}
+	w := len(e[0])
+	for y, row := range e {
+		if len(row) != w {
+			return errors.New("matrix is not rectangular: rows have different lengths")
+		}
+		for x, v := range row {
+			if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) {
+				return errors.New("matrix contains a non-finite value at row " +
+					strconv.Itoa(y) + ", column " + strconv.Itoa(x))
+			}
+		}
+	}
+
+	curPx := e.CurrentPixel()
+	if curPx < 0 {
+		return errors.New("the top row must start with at least one zero value, " +
+			"so that the current pixel has a position")
+	}
+	for x := 0; x <= curPx && x < w; x++ {
+		if e[0][x] != 0 {
+			return errors.New("matrix has a non-zero value in the top row at or " +
+				"left of the current pixel, which would modify pixels that were " +
+				"already processed")
+		}
+	}
+	return nil
+}
+
 // ErrorDiffusionStrength modifies an existing error diffusion matrix so that it will
 // be applied with the specified strength.
 //
 // strength is usually a value from 0 to 1.0, where 1.0 means 100% strength, and will
 // not modify the matrix at all. It is inversely proportional to contrast - reducing the
 // strength increases the contrast. It can be useful at values like 0.8 for reducing
-// noise in the dithered image.
+// noise in the dithered image. It must be a finite number, otherwise the
+// function panics.
+//
+// The returned matrix is always a copy; the provided matrix is never modified,
+// and later changes to one never affect the other.
 //
 // See the documentation for Bayer for more details.
 func ErrorDiffusionStrength(edm ErrorDiffusionMatrix, strength float32) ErrorDiffusionMatrix {
-	if strength == 1 {
-		return edm
+	if math.IsNaN(float64(strength)) || math.IsInf(float64(strength), 0) {
+		panic("dither: ErrorDiffusionStrength: strength must be a finite number")
 	}
 
 	dy := len(edm)
-	dx := len(edm[0])
 	edm2 := make(ErrorDiffusionMatrix, dy)
 	for y := 0; y < dy; y++ {
-		edm2[y] = make([]float32, dx)
-		for x := 0; x < dx; x++ {
+		edm2[y] = make([]float32, len(edm[y]))
+		for x := range edm[y] {
 			edm2[y][x] = edm[y][x] * strength
 		}
 	}
